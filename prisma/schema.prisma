@@ -1,0 +1,97 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma" // Output path for Prisma Client
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Define Enums for status and role fields for better type safety
+
+enum Role {
+  CLIENT
+  ADMIN
+}
+
+enum LicenseStatus {
+  INACTIVE
+  ACTIVE
+  EXPIRED
+  BLOCKED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+  INACTIVE // Added INACTIVE as per original SQL
+}
+
+model User {
+  id            Int          @id @default(autoincrement())
+  email         String       @unique
+  passwordHash  String // Renamed from password_hash for Prisma convention
+  role          Role         @default(CLIENT)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  licenses      License[]    // Relation to License model
+  subscriptions Subscription[] // Relation to Subscription model
+}
+
+model Product {
+  id            Int      @id @default(autoincrement())
+  name          String
+  description   String?
+  version       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  licensedProducts LicenseProductAccess[] // Relation to the join table
+}
+
+model License {
+  id            Int      @id @default(autoincrement())
+  licenseKey    String   @unique @default(uuid()) // Prisma can use uuid() for strings
+  userId        Int?     // Optional if a license can be unassigned or assigned later
+  user          User?    @relation(fields: [userId], references: [id])
+  status        LicenseStatus @default(INACTIVE)
+  expiresAt     DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  subscriptions Subscription[] // A license might have multiple subscription periods over time, or be part of one active sub.
+                               // Depending on exact logic, this relation might be different.
+                               // For now, one license can be linked to multiple subscription entries.
+  grantedProducts LicenseProductAccess[] // Relation to the join table
+}
+
+model Subscription {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  licenseId     Int?     // A subscription might be linked to a specific license
+  license       License? @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  planType      String?
+  startDate     DateTime @default(now())
+  endDate       DateTime?
+  status        SubscriptionStatus @default(INACTIVE)
+  paymentProviderSubscriptionId String? @unique // For Stripe/PayPal subscription ID
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Explicit many-to-many relation table for Licenses and Products
+// This is needed because we have an extra field `grantedAt`.
+model LicenseProductAccess {
+  licenseId  Int
+  license    License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  productId  Int
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  grantedAt  DateTime @default(now())
+
+  @@id([licenseId, productId]) // Composite primary key
+}
