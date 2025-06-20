@@ -56,7 +56,7 @@ model Product {
 
 model License {
   id            Int      @id @default(autoincrement())
-  licenseKey    String   @unique @default(uuid()) // Prisma can use uuid() for strings
+  licenseKey    String   @unique // Prisma can use uuid() for strings
   userId        Int?     // Optional if a license can be unassigned or assigned later
   user          User?    @relation(fields: [userId], references: [id])
   status        LicenseStatus @default(INACTIVE)

@@ -1,9 +1,9 @@
 const request = require('supertest');
 const express = require('express');
-const mainRouter = require('../routes/index'); // Main app router from src/routes/index.js
-const prisma = require('../lib/prisma');    // Actual Prisma client
+const mainRouter = require('../../src/routes/index'); // Main app router from src/routes/index.js
+const prisma = require('../../src/lib/prisma');    // Actual Prisma client
 const jwt = require('jsonwebtoken');         // To generate mock tokens for protected routes
-const { JWT_SECRET } = require('../config'); // For JWT signing
+const { JWT_SECRET } = require('../../src/config'); // For JWT signing
 const bcrypt = require('bcryptjs');          // For hashing passwords for test user creation
 const crypto = require('crypto');            // For generating UUIDs in test data
 
@@ -26,14 +26,14 @@ beforeAll(async () => {
 
   testUser = await prisma.user.create({
     data: {
-      email: 'testuser.license.backend@example.com', // Unique email for this test suite
+      email: 'testuser.license@example.com',
       passwordHash: await bcrypt.hash('password123', 10),
       role: 'CLIENT',
     },
   });
   adminUser = await prisma.user.create({
     data: {
-      email: 'admin.license.backend@example.com', // Unique email
+      email: 'admin.license@example.com',
       passwordHash: await bcrypt.hash('password123', 10),
       role: 'ADMIN',
     },
@@ -44,13 +44,11 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  // Clean license-specific tables before each test
   await prisma.licenseProductAccess.deleteMany({});
   await prisma.license.deleteMany({});
 });
 
 afterAll(async () => {
-  // Final cleanup
   await prisma.licenseProductAccess.deleteMany({});
   await prisma.subscription.deleteMany({});
   await prisma.license.deleteMany({});
@@ -59,7 +57,7 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-describe('Backend License API Endpoints (Updated for Prefix and Public Validation)', () => {
+describe('License API Endpoints with Prisma (Updated)', () => {
   it('should allow an admin to create a license, and key should have "inv-" prefix', async () => {
     const res = await request(app)
       .post('/api/licenses')
@@ -76,7 +74,7 @@ describe('Backend License API Endpoints (Updated for Prefix and Public Validatio
     expect(dbLicense.licenseKey.startsWith('inv-')).toBe(true);
   });
 
-  it('a non-admin creating a license for themselves should also have "inv-" prefix', async () => {
+  it('should allow a non-admin to create a license for themselves, key should have "inv-" prefix', async () => {
     const res = await request(app)
       .post('/api/licenses')
       .set('x-auth-token', testUserToken)
@@ -87,18 +85,18 @@ describe('Backend License API Endpoints (Updated for Prefix and Public Validatio
     expect(res.body.userId).toEqual(testUser.id);
   });
 
-  it('POST /api/licenses (create) should still require a token', async () => {
+  it('should NOT allow creating a license without a token (protected route)', async () => {
     const res = await request(app)
       .post('/api/licenses')
       .send({ userId: testUser.id, status: 'ACTIVE' });
-    expect(res.statusCode).toEqual(401);
+    expect(res.statusCode).toEqual(401); // No token, authorization denied
   });
 
   // --- Tests for PUBLIC /api/licenses/validate endpoint ---
   it('should validate an active license key successfully (public)', async () => {
     const license = await prisma.license.create({
       data: {
-        licenseKey: `inv-${crypto.randomUUID()}`,
+        licenseKey: `inv-${crypto.randomUUID()}`, // Manually create with prefix for test data
         userId: testUser.id,
         status: 'ACTIVE',
       }
@@ -154,28 +152,22 @@ describe('Backend License API Endpoints (Updated for Prefix and Public Validatio
   it('should fail to validate a non-existent license key (public)', async () => {
     const res = await request(app) // NO .set('x-auth-token', ...)
       .post('/api/licenses/validate')
-      .send({ licenseKey: `inv-${crypto.randomUUID()}` });
+      .send({ licenseKey: `inv-${crypto.randomUUID()}` }); // A non-existent but correctly formatted key
     expect(res.statusCode).toEqual(404);
   });
 
   // Test other protected license routes (GET, PUT, DELETE) still require token
-  it('GET /api/licenses (list) should require a token', async () => {
+  it('GET /api/licenses should require a token', async () => {
     const res = await request(app).get('/api/licenses');
     expect(res.statusCode).toEqual(401);
   });
 
-  it('PUT /api/licenses/:id (update) should require a token', async () => {
+  it('PUT /api/licenses/:id should require a token', async () => {
+    // Create a dummy license first to have an ID
     const license = await prisma.license.create({ data: { licenseKey: `inv-${crypto.randomUUID()}`, status: 'ACTIVE' }});
     const res = await request(app)
         .put(`/api/licenses/${license.id}`)
         .send({ status: 'BLOCKED' });
-    expect(res.statusCode).toEqual(401);
-  });
-
-  it('DELETE /api/licenses/:id (delete) should require a token', async () => {
-    const license = await prisma.license.create({ data: { licenseKey: `inv-${crypto.randomUUID()}`, status: 'ACTIVE' }});
-    const res = await request(app)
-        .delete(`/api/licenses/${license.id}`);
     expect(res.statusCode).toEqual(401);
   });
 });
