@@ -113,3 +113,28 @@ exports.login = async (req, res) => {
         res.status(500).json({ message: 'Server error during login' });
     }
 };
+
+// GET /api/users - List all users (Admin only)
+exports.listUsers = async (req, res) => {
+    if (req.user.role !== 'ADMIN') {
+        return res.status(403).json({ message: 'Forbidden: Only admins can list users.' });
+    }
+    try {
+        const users = await prisma.user.findMany({
+            select: { // Select specific fields to avoid exposing passwordHash
+                id: true,
+                email: true,
+                role: true,
+                createdAt: true,
+                updatedAt: true,
+                _count: { // Example of counting related records
+                    select: { licenses: true, subscriptions: true }
+                }
+            }
+        });
+        res.json(users);
+    } catch (error) {
+        console.error('List users error:', error);
+        res.status(500).json({ message: 'Server error while listing users.' });
+    }
+};
