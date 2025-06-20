@@ -1,0 +1,45 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "jest",
+    "migrate": "npx node-pg-migrate",
+    "migrate:create": "npm run migrate create -- -m",
+    "migrate:up": "npm run migrate up",
+    "migrate:down": "npm run migrate down"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zeta-develop/nexusBP.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/zeta-develop/nexusBP/issues"
+  },
+  "homepage": "https://github.com/zeta-develop/nexusBP#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "node-pg-migrate": "^8.0.3",
+    "pg": "^8.16.2"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^8.0.0",
+    "jest": "^30.0.2",
+    "supertest": "^7.1.1"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "coveragePathIgnorePatterns": [
+      "/node_modules/"
+    ]
+  }
+}
