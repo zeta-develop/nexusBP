@@ -1,74 +1,71 @@
-const prisma = require('../lib/prisma'); // Import Prisma client
-// const { LicenseStatus } = require('@prisma/client'); // Or rely on string mapping
+const crypto = require('crypto'); // For generating UUIDs
+const prisma = require('../lib/prisma');
 
-// Define LicenseStatus enum values for validation if not importing directly
 const validLicenseStatuses = ['INACTIVE', 'ACTIVE', 'EXPIRED', 'BLOCKED'];
 
-// Remove in-memory store for licenses
-// const licensesStore = [];
-// let licenseIdCounter = 1;
-
-// POST /api/licenses - Create a new license
 exports.createLicense = async (req, res) => {
-    let { userId, status, expiresAt, productId } = req.body; // productId for potential LicenseProductAccess
+    let { userId, status, expiresAt, productId } = req.body;
 
-    // Validate status
     if (status) {
         status = status.toUpperCase();
         if (!validLicenseStatuses.includes(status)) {
             return res.status(400).json({ message: `Invalid status. Must be one of: ${validLicenseStatuses.join(', ')}` });
         }
     } else {
-        status = 'INACTIVE'; // Default status
+        status = 'INACTIVE';
     }
 
-    // For admin roles - check req.user.role (assuming authMiddleware adds user to req)
-    // For now, allowing non-admin for testing as per original logic, with a warning.
-    // This should be strictly enforced in a production scenario.
     if (req.user && req.user.role !== 'ADMIN' && userId && parseInt(userId) !== req.user.id) {
-         console.warn("Warning: Non-admin user attempting to create license for another user.");
-        // return res.status(403).json({ message: 'Forbidden: You can only create licenses for yourself unless you are an admin.' });
+        console.warn("Warning: Non-admin user attempting to create license for another user.");
+        // In production, return res.status(403) here.
     }
-    if (req.user && req.user.role !== 'ADMIN' && !userId) { // If creating for self, userId can be omitted by non-admin
+    if (req.user && req.user.role !== 'ADMIN' && !userId) { // Non-admin creating for self
         userId = req.user.id;
     }
 
+    const generatedLicenseKey = `inv-${crypto.randomUUID()}`; // Generate prefixed UUID
 
     try {
         const licenseData = {
+            licenseKey: generatedLicenseKey, // Use the generated key
             status: status,
             expiresAt: expiresAt ? new Date(expiresAt) : null,
         };
-        if (userId) {
+        // Only include userId if it's defined (either passed by admin or set for self)
+        if (userId !== undefined && userId !== null) {
             licenseData.userId = parseInt(userId);
         }
 
+
         const newLicense = await prisma.license.create({
             data: licenseData,
-            include: { user: { select: { id: true, email: true } } } // Include some user details
+            include: { user: { select: { id: true, email: true } } }
         });
 
-        // If productId is provided, create LicenseProductAccess entry (simplified for now)
         if (productId && newLicense) {
             await prisma.licenseProductAccess.create({
                 data: {
                     licenseId: newLicense.id,
                     productId: parseInt(productId)
                 }
-            }).catch(err => console.error("Failed to create LicenseProductAccess:", err)); // Log error but don't fail license creation
+            }).catch(err => console.error("Failed to create LicenseProductAccess:", err)); // Log error, but don't fail license creation for this
         }
 
         res.status(201).json(newLicense);
     } catch (error) {
         console.error('Create license error:', error);
-        if (error.code === 'P2003' && error.message.includes('foreign key constraint failed on the field: `userId`')) {
+        if (error.code === 'P2002' && error.meta?.target?.includes('licenseKey')) {
+            // This case should be extremely rare with UUIDs.
+            // If it happens, it implies a UUID collision or a non-UUID value was somehow attempted.
+            return res.status(500).json({ message: 'Failed to generate a unique license key. Please try again.' });
+        }
+        if (error.code === 'P2003' && error.meta?.field_name?.includes('userId')) {
             return res.status(400).json({ message: 'Invalid userId: User does not exist.' });
         }
-        if (error.code === 'P2003' && error.message.includes('foreign key constraint failed on the field: `productId`')) {
-             // This part is tricky if LicenseProductAccess fails after license creation.
-             // Ideally, this should be a transaction.
-            console.error('Error linking product to license. License created, but product link failed.');
-            // Potentially return a specific error or just the created license with a warning.
+        // Handle other potential errors like productId not found if that's a hard requirement
+        if (error.code === 'P2003' && error.meta?.field_name?.includes('productId')) {
+             console.error('Error linking product to license. Product may not exist.');
+             // Depending on requirements, you might still return the license or a specific error
         }
         res.status(500).json({ message: 'Server error during license creation' });
     }
@@ -93,7 +90,7 @@ exports.getLicenses = async (req, res) => {
                 ...queryOptions
             });
         } else {
-            return res.status(401).json({ message: 'Unauthorized' }); // Should be caught by authMiddleware
+            return res.status(401).json({ message: 'Unauthorized' });
         }
         res.json(licenses);
     } catch (error) {
@@ -122,7 +119,6 @@ exports.getLicenseById = async (req, res) => {
             return res.status(404).json({ message: 'License not found' });
         }
 
-        // Check ownership or admin role
         if (req.user.role === 'ADMIN' || (license.userId && req.user.id === license.userId)) {
             res.json(license);
         } else {
@@ -143,7 +139,6 @@ exports.updateLicense = async (req, res) => {
 
     let { status, expiresAt } = req.body;
 
-    // For admin roles only
     if (req.user && req.user.role !== 'ADMIN') {
         return res.status(403).json({ message: 'Forbidden: Only admins can update licenses.' });
     }
@@ -159,7 +154,7 @@ exports.updateLicense = async (req, res) => {
         const updatedLicense = await prisma.license.update({
             where: { id: licenseId },
             data: {
-                status: status, // status will be undefined if not provided, Prisma won't update it
+                status: status,
                 expiresAt: expiresAt !== undefined ? (expiresAt ? new Date(expiresAt) : null) : undefined,
             },
             include: { user: { select: { id: true, email: true } } }
@@ -167,7 +162,7 @@ exports.updateLicense = async (req, res) => {
         res.json(updatedLicense);
     } catch (error) {
         console.error('Update license error:', error);
-        if (error.code === 'P2025') { // Record to update not found
+        if (error.code === 'P2025') {
             return res.status(404).json({ message: 'License not found' });
         }
         res.status(500).json({ message: 'Server error' });
@@ -181,20 +176,26 @@ exports.deleteLicense = async (req, res) => {
         return res.status(400).json({ message: 'Invalid license ID format.' });
     }
 
-    // For admin roles only
     if (req.user && req.user.role !== 'ADMIN') {
         return res.status(403).json({ message: 'Forbidden: Only admins can delete licenses.' });
     }
 
     try {
+        // Prisma requires related records in LicenseProductAccess to be deleted first
+        // if onDelete: Cascade is not fully effective or if there are other constraints.
+        // For simplicity, this assumes cascade delete on LicenseProductAccess via schema works.
         await prisma.license.delete({
             where: { id: licenseId },
         });
         res.status(200).json({ message: 'License deleted successfully' });
     } catch (error) {
         console.error('Delete license error:', error);
-        if (error.code === 'P2025') { // Record to delete not found
+        if (error.code === 'P2025') {
             return res.status(404).json({ message: 'License not found' });
+        }
+        // Handle P2003 if foreign key constraints prevent deletion (e.g. Subscription points to it without onDelete: Cascade or SET NULL)
+        if (error.code === 'P2003' && error.meta?.field_name?.includes('Subscription_licenseId_fkey')) {
+            return res.status(400).json({ message: 'Cannot delete license: It is still referenced by subscriptions.'});
         }
         res.status(500).json({ message: 'Server error' });
     }
@@ -218,7 +219,6 @@ exports.validateLicense = async (req, res) => {
 
         if (license.status === 'EXPIRED' || (license.expiresAt && new Date(license.expiresAt) < new Date() && license.status !== 'EXPIRED')) {
             if (license.status !== 'EXPIRED') {
-                // License has passed expiry date and status is not yet EXPIRED, update it.
                 await prisma.license.update({
                     where: { licenseKey: licenseKey },
                     data: { status: 'EXPIRED' }
