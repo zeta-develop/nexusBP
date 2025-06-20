@@ -1,73 +1,106 @@
-// In-memory store for subscriptions
-const subscriptionsStore = [];
-let subscriptionIdCounter = 1;
+const prisma = require('../lib/prisma'); // Import Prisma client
 
-// In-memory store for users (from authController, for checking user existence)
-// This is a simplified approach for the subtask. In a real app, you'd query the DB.
-// const { usersStore } = require('./authController'); // This direct import might be tricky with how files are evaluated in subtasks.
-// For simplicity, we'll assume user validation happens or is less strict in this isolated step.
+// Define SubscriptionStatus enum values for validation
+const validSubscriptionStatuses = ['ACTIVE', 'CANCELED', 'PAST_DUE', 'TRIALING', 'INACTIVE'];
+
+// Remove in-memory store
+// const subscriptionsStore = [];
+// let subscriptionIdCounter = 1;
 
 // POST /api/subscriptions - Create a new subscription
 exports.createSubscription = async (req, res) => {
-    // req.user is available from authMiddleware
     const loggedInUserId = req.user.id;
-    const { userId, licenseId, planType, endDate, status = 'active' } = req.body;
+    let { userId, licenseId, planType, endDate, status } = req.body;
 
-    // Validate input
-    const targetUserId = userId ? parseInt(userId) : loggedInUserId; // Default to logged-in user if userId not provided by admin
+    const targetUserId = userId ? parseInt(userId) : loggedInUserId;
 
     if (!targetUserId || !planType) {
-        return res.status(400).json({ message: 'UserId (or be logged in) and planType are required' });
+        return res.status(400).json({ message: 'User ID (or be logged in) and planType are required' });
     }
 
-    // Admin check: Only admins can create subscriptions for OTHERS. Users can create for themselves.
-    if (userId && parseInt(userId) !== loggedInUserId && req.user.role !== 'admin') {
+    if (userId && parseInt(userId) !== loggedInUserId && req.user.role !== 'ADMIN') {
         return res.status(403).json({ message: 'Forbidden: You can only create subscriptions for yourself unless you are an admin.' });
     }
 
-    // TODO: Validate that userId exists in the users table
-    // TODO: Validate that licenseId (if provided) exists and potentially links to the user
+    if (status) {
+        status = status.toUpperCase();
+        if (!validSubscriptionStatuses.includes(status)) {
+            return res.status(400).json({ message: `Invalid status. Must be one of: ${validSubscriptionStatuses.join(', ')}` });
+        }
+    } else {
+        status = 'INACTIVE'; // Default status
+    }
 
     try {
-        const newSubscription = {
-            id: subscriptionIdCounter++,
-            user_id: targetUserId,
-            license_id: licenseId ? parseInt(licenseId) : null,
-            plan_type: planType,
-            start_date: new Date(),
-            end_date: endDate ? new Date(endDate) : null,
+        const subscriptionData = {
+            userId: targetUserId,
+            planType: planType,
             status: status,
-            created_at: new Date(),
-            updated_at: new Date()
+            startDate: new Date(), // Or allow startDate from req.body
+            endDate: endDate ? new Date(endDate) : null,
         };
-        subscriptionsStore.push(newSubscription);
-        console.log('In-memory subscriptionsStore after creation:', subscriptionsStore);
+        if (licenseId) {
+            subscriptionData.licenseId = parseInt(licenseId);
+        }
+
+        const newSubscription = await prisma.subscription.create({
+            data: subscriptionData,
+            include: {
+                user: { select: { id: true, email: true } },
+                license: { select: { id: true, licenseKey: true } }
+            }
+        });
         res.status(201).json(newSubscription);
     } catch (error) {
         console.error('Create subscription error:', error);
+        if (error.code === 'P2003') { // Foreign key constraint failed
+             if (error.meta?.field_name?.includes('userId')) {
+                return res.status(400).json({ message: 'Invalid userId: User does not exist.' });
+            }
+            if (error.meta?.field_name?.includes('licenseId')) {
+                return res.status(400).json({ message: 'Invalid licenseId: License does not exist.' });
+            }
+        }
         res.status(500).json({ message: 'Server error during subscription creation' });
     }
 };
 
-// GET /api/users/:userId/subscriptions - Get subscriptions for a specific user (Admin access)
+// GET /api/users/:userId/subscriptions - Get subscriptions for a specific user (Admin or self)
 // GET /api/subscriptions/mine - Get subscriptions for the logged-in user
+// GET /api/subscriptions - Get all subscriptions (Admin only)
 exports.getSubscriptions = async (req, res) => {
     try {
-        let userSubscriptions;
+        let queryConditions = {};
+        const includeOptions = {
+            user: { select: { id: true, email: true } },
+            license: { select: { id: true, licenseKey: true } }
+        };
+
         if (req.params.userId) { // Endpoint: /api/users/:userId/subscriptions
-            if (req.user.role !== 'admin' && req.user.id !== parseInt(req.params.userId)) {
+            const targetUserId = parseInt(req.params.userId);
+            if (isNaN(targetUserId)) {
+                return res.status(400).json({ message: 'Invalid user ID format.'});
+            }
+            if (req.user.role !== 'ADMIN' && req.user.id !== targetUserId) {
                 return res.status(403).json({ message: 'Forbidden: You can only view your own subscriptions or you must be an admin.' });
             }
-            const targetUserId = parseInt(req.params.userId);
-            userSubscriptions = subscriptionsStore.filter(sub => sub.user_id === targetUserId);
-        } else { // Endpoint: /api/subscriptions/mine (or a general /api/subscriptions for admins)
-            if (req.user.role === 'admin' && !req.originalUrl.endsWith('/mine')) { // Admin getting all subscriptions
-                 userSubscriptions = subscriptionsStore;
-            } else { // User getting their own subscriptions
-                userSubscriptions = subscriptionsStore.filter(sub => sub.user_id === req.user.id);
+            queryConditions.where = { userId: targetUserId };
+        } else { // Endpoints: /api/subscriptions/mine or /api/subscriptions
+            if (req.originalUrl.endsWith('/mine')) { // User getting their own subscriptions
+                queryConditions.where = { userId: req.user.id };
+            } else { // Admin getting all subscriptions via /api/subscriptions
+                if (req.user.role !== 'ADMIN') {
+                    // If not admin and not /mine, it's like /api/subscriptions for a non-admin: treat as /mine
+                    queryConditions.where = { userId: req.user.id };
+                }
+                // If admin, no specific where clause here means all subscriptions
             }
         }
-        res.json(userSubscriptions);
+
+        queryConditions.include = includeOptions;
+        const subscriptions = await prisma.subscription.findMany(queryConditions);
+        res.json(subscriptions);
+
     } catch (error) {
         console.error('Get subscriptions error:', error);
         res.status(500).json({ message: 'Server error' });
@@ -77,36 +110,61 @@ exports.getSubscriptions = async (req, res) => {
 // PUT /api/subscriptions/:subscriptionId - Update a subscription
 exports.updateSubscription = async (req, res) => {
     const subscriptionId = parseInt(req.params.subscriptionId);
-    const { planType, endDate, status } = req.body;
+    if (isNaN(subscriptionId)) {
+        return res.status(400).json({ message: 'Invalid subscription ID format.' });
+    }
+
+    let { planType, endDate, status, licenseId } = req.body;
+
+    // Validate status if provided
+    if (status) {
+        status = status.toUpperCase();
+        if (!validSubscriptionStatuses.includes(status)) {
+            return res.status(400).json({ message: `Invalid status. Must be one of: ${validSubscriptionStatuses.join(', ')}` });
+        }
+    }
 
     try {
-        const subscriptionIndex = subscriptionsStore.findIndex(sub => sub.id === subscriptionId);
-        if (subscriptionIndex === -1) {
+        // First, find the subscription to check ownership if not admin
+        const subscription = await prisma.subscription.findUnique({ where: { id: subscriptionId } });
+        if (!subscription) {
             return res.status(404).json({ message: 'Subscription not found' });
         }
 
-        const originalSubscription = subscriptionsStore[subscriptionIndex];
-
-        // Authorization: Admin can update any. User can only update their own (e.g. cancel).
-        if (req.user.role !== 'admin' && req.user.id !== originalSubscription.user_id) {
+        if (req.user.role !== 'ADMIN' && req.user.id !== subscription.userId) {
             return res.status(403).json({ message: 'Forbidden: You cannot update this subscription.' });
         }
 
-        // More granular control might be needed here for what a user can update vs an admin
-        // For example, a user might only be allowed to change 'status' to 'canceled'.
+        // Admin can update more fields, user might be restricted (e.g., only status to 'CANCELED')
+        // For now, allowing fields to be updated if user is owner or admin.
+        const dataToUpdate = {};
+        if (planType !== undefined) dataToUpdate.planType = planType;
+        if (endDate !== undefined) dataToUpdate.endDate = endDate ? new Date(endDate) : null;
+        if (status !== undefined) dataToUpdate.status = status;
+        if (licenseId !== undefined) dataToUpdate.licenseId = licenseId ? parseInt(licenseId) : null;
 
-        const updatedSubscription = {
-            ...originalSubscription,
-            plan_type: planType !== undefined ? planType : originalSubscription.plan_type,
-            end_date: endDate !== undefined ? new Date(endDate) : originalSubscription.end_date,
-            status: status !== undefined ? status : originalSubscription.status,
-            updated_at: new Date()
-        };
-        subscriptionsStore[subscriptionIndex] = updatedSubscription;
-        console.log('In-memory subscriptionsStore after update:', subscriptionsStore);
+
+        if (Object.keys(dataToUpdate).length === 0) {
+            return res.status(400).json({ message: 'No valid fields provided for update.' });
+        }
+
+        const updatedSubscription = await prisma.subscription.update({
+            where: { id: subscriptionId },
+            data: dataToUpdate,
+            include: {
+                user: { select: { id: true, email: true } },
+                license: { select: { id: true, licenseKey: true } }
+            }
+        });
         res.json(updatedSubscription);
     } catch (error) {
         console.error('Update subscription error:', error);
+        if (error.code === 'P2025') { // Record to update not found (already checked, but good for safety)
+            return res.status(404).json({ message: 'Subscription not found during update.' });
+        }
+        if (error.code === 'P2003' && error.meta?.field_name?.includes('licenseId')) { // Foreign key constraint for licenseId
+            return res.status(400).json({ message: 'Invalid licenseId: License does not exist.' });
+        }
         res.status(500).json({ message: 'Server error' });
     }
 };
